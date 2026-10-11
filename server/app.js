@@ -117,9 +117,9 @@ export function createApp() {
     return response.status(503).json({ status: 'unavailable', timestamp: Date.now() })
   })
   app.get(['/api/v1/docs', '/api/docs'], (request, response) => response.status(200).json(getOpenApiDocument()))
-  app.use(['/api/v1/auth', '/api/auth'], authRouter)
-  app.use(['/api/v1/admin', '/api/admin'], adminRouter)
-  app.use(['/api/v1/member', '/api/member'], memberRouter)
+  app.use(['/api/v1/auth', '/api/auth', '/v1/auth', '/auth'], authRouter)
+  app.use(['/api/v1/admin', '/api/admin', '/v1/admin', '/admin'], adminRouter)
+  app.use(['/api/v1/member', '/api/member', '/v1/member', '/member'], memberRouter)
 
   if (env.isProduction) {
     const distDirectory = path.join(workspaceRoot, 'dist')
