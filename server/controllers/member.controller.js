@@ -1090,6 +1090,7 @@ export async function listGallery(request, response) {
     include: { photos: { orderBy: { createdAt: 'desc' } } },
     orderBy: { createdAt: 'desc' },
   })
+  response.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')
   return response.status(200).json({ albums })
 }
 
@@ -1100,6 +1101,7 @@ export async function getGalleryAlbum(request, response) {
     include: { photos: { orderBy: { createdAt: 'desc' } } },
   })
   if (!album) return response.status(404).json({ message: 'Album not found.' })
+  response.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')
   return response.status(200).json({ album })
 }
 
@@ -1108,11 +1110,13 @@ export async function listClubTeam(request, response) {
     where: { isActive: true, approvalStatus: { in: ['APPROVED', 'PUBLISHED'] } },
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
   })
+  response.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')
   return response.status(200).json({ team })
 }
 
 export async function getPublicClubSettings(request, response) {
   const dictionary = await getCachedClubSettingsDictionary()
+  response.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')
   return response.status(200).json({ settings: dictionary })
 }
 

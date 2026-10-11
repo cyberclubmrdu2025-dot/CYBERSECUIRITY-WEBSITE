@@ -4,14 +4,21 @@ import clubLogoDark from './assets/branding/cyber-security-club-logo.jpg'
 import mrduBanner from './assets/branding/mrdu-header-banner.png'
 import mrduOfficialLogo from './assets/branding/mrdu-official-logo.png'
 import MrduOfficialLanding from './components/MrduOfficialLanding'
-import { adminApi, authApi, memberApi, readImageFile, readMultipleImageFiles } from './lib/api'
+import { adminApi, authApi, memberApi, readImageFile, readMultipleImageFiles, isUserActive } from './lib/api'
 import { downloadIdPass } from './lib/id-pass'
 import { downloadCsv } from './lib/export-csv'
 import { getYouTubeEmbedUrl, parseYouTubeVideoId } from './lib/video'
 import { READ_ONLY_CLUB_ROLES, isReadOnlyClubRole } from './lib/constants'
 import jsQR from 'jsqr'
-import * as XLSX from 'xlsx'
 import './App.css'
+
+let _cachedXlsx = null
+async function getXlsx() {
+  if (!_cachedXlsx) {
+    _cachedXlsx = await import('xlsx')
+  }
+  return _cachedXlsx
+}
 import {
   IconMenu,
   IconX,
@@ -3610,14 +3617,14 @@ function MemberManagement({ user, logout, onNavigate }) {
   useEffect(() => {
     loadMembers()
     const interval = setInterval(() => {
-      if (document.hidden || editingId || permissionsModalUser || resetModalUser) return
+      if (document.hidden || !isUserActive() || editingId || permissionsModalUser || resetModalUser) return
       adminApi.listMembers()
         .then(res => {
           const list = Array.isArray(res?.users) ? res.users : (Array.isArray(res?.members) ? res.members : (Array.isArray(res) ? res : []))
           if (list.length > 0) setMembers(list)
         })
         .catch(() => {})
-    }, 60000)
+    }, 120000)
     return () => clearInterval(interval)
   }, [platformMode, editingId, permissionsModalUser, resetModalUser])
 
@@ -5252,14 +5259,14 @@ function CoordinatorConsole({ user, logout, onNavigate }) {
   useEffect(() => {
     loadMembers()
     const interval = setInterval(() => {
-      if (document.hidden || savingId) return
+      if (document.hidden || !isUserActive() || savingId) return
       adminApi.listMembers()
         .then(res => {
           const list = Array.isArray(res?.users) ? res.users : (Array.isArray(res?.members) ? res.members : (Array.isArray(res) ? res : []))
           if (list.length > 0) setMembers(list)
         })
         .catch(() => {})
-    }, 60000)
+    }, 120000)
     return () => clearInterval(interval)
   }, [savingId])
 
@@ -7253,14 +7260,14 @@ function EventManagement({ user, logout, onNavigate }) {
   useEffect(() => {
     let mounted = true
     function fetchEvents() {
-      if (document.hidden || editingEventId) return
+      if (document.hidden || !isUserActive() || editingEventId) return
       adminApi.listEvents()
         .then(({ events: list }) => { if (mounted) setEvents(list || []) })
         .catch(err => { if (mounted) setError(err.message) })
         .finally(() => { if (mounted) setLoading(false) })
     }
     fetchEvents()
-    const interval = setInterval(fetchEvents, 60000)
+    const interval = setInterval(fetchEvents, 120000)
     return () => {
       mounted = false
       clearInterval(interval)
@@ -7272,12 +7279,12 @@ function EventManagement({ user, logout, onNavigate }) {
     if (!analyticsModalEvent) return
     let mounted = true
     function refreshRoster() {
-      if (document.hidden) return
+      if (document.hidden || !isUserActive()) return
       adminApi.getEventDetailsWithStats(analyticsModalEvent.id)
         .then(data => { if (mounted) setAnalyticsData(data) })
         .catch(() => {})
     }
-    const interval = setInterval(refreshRoster, 30000)
+    const interval = setInterval(refreshRoster, 60000)
     return () => {
       mounted = false
       clearInterval(interval)
@@ -10848,8 +10855,9 @@ function BulkEventPassModal({ isOpen, onClose, events = [], onSuccess }) {
     const reader = new FileReader()
 
     if (isBinary) {
-      reader.onload = evt => {
+      reader.onload = async evt => {
         try {
+          const XLSX = await getXlsx()
           const data = new Uint8Array(evt.target.result)
           const workbook = XLSX.read(data, { type: 'array' })
           const firstSheetName = workbook.SheetNames[0]
@@ -10918,7 +10926,7 @@ function BulkEventPassModal({ isOpen, onClose, events = [], onSuccess }) {
   }
 
   // Download sample template (.xlsx & .csv)
-  function handleDownloadTemplate() {
+  async function handleDownloadTemplate() {
     const headers = ['Student ID / Roll Number', 'Student Name (Optional)', 'Notes']
     const sampleRows = [
       ['23CS101', 'Dhanush G', 'Paid Cash ₹150'],
@@ -10927,6 +10935,7 @@ function BulkEventPassModal({ isOpen, onClose, events = [], onSuccess }) {
       ['23CS104', 'Rahul Verma', 'Direct Pass'],
     ]
     try {
+      const XLSX = await getXlsx()
       const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleRows])
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Passes_Roster')
@@ -11728,8 +11737,9 @@ function PassEmailDispatchModal({
     const reader = new FileReader()
 
     if (isBinary) {
-      reader.onload = evt => {
+      reader.onload = async evt => {
         try {
+          const XLSX = await getXlsx()
           const data = new Uint8Array(evt.target.result)
           const workbook = XLSX.read(data, { type: 'array' })
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
@@ -11769,7 +11779,7 @@ function PassEmailDispatchModal({
     e.target.value = ''
   }
 
-  function handleDownloadSampleTemplate() {
+  async function handleDownloadSampleTemplate() {
     const headers = ['Roll Number', 'Email (Optional - Auto Links to Account)', 'Custom Message (Optional per Student)']
     const sampleRows = [
       ['23EU07R0015', 'student1@mallareddyuniversity.ac.in', 'Welcome! Please report to Desk A by 9:30 AM.'],
@@ -11777,6 +11787,7 @@ function PassEmailDispatchModal({
       ['23CS102', '', ''],
     ]
     try {
+      const XLSX = await getXlsx()
       const ws = XLSX.utils.aoa_to_sheet([headers, ...sampleRows])
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Pass_Emails')
@@ -13104,7 +13115,7 @@ function PaymentManagement({ user, logout, onNavigate }) {
   useEffect(() => {
     loadPasses()
     const interval = setInterval(() => {
-      if (document.hidden || selectedPass || rejectingPass) return
+      if (document.hidden || !isUserActive() || selectedPass || rejectingPass) return
       adminApi.listAllPasses({
         eventId: eventFilter,
         paymentStatus: paymentFilter,
@@ -13112,7 +13123,7 @@ function PaymentManagement({ user, logout, onNavigate }) {
       }).then(passRes => {
         if (passRes?.passes) setPasses(passRes.passes)
       }).catch(() => {})
-    }, 45000)
+    }, 90000)
     return () => clearInterval(interval)
   }, [eventFilter, paymentFilter, attendanceFilter, selectedPass, rejectingPass])
 
@@ -16800,14 +16811,14 @@ function StudentEvents({ user, logout, onNavigate }) {
   useEffect(() => {
     let mounted = true
     function fetchEvents() {
-      if (document.hidden) return
+      if (document.hidden || !isUserActive()) return
       memberApi.listEvents()
         .then(({ events: list }) => { if (mounted) setEvents(list || []) })
         .catch(() => {})
         .finally(() => { if (mounted) setLoading(false) })
     }
     fetchEvents()
-    const interval = setInterval(fetchEvents, 60000)
+    const interval = setInterval(fetchEvents, 120000)
     return () => {
       mounted = false
       clearInterval(interval)
@@ -16980,7 +16991,7 @@ function StudentRegistrations({ user, logout, onNavigate }) {
   const [projectSuccess, setProjectSuccess] = useState('')
 
   function fetchRegistrations() {
-    if (document.hidden) return
+    if (document.hidden || !isUserActive()) return
     memberApi.listRegistrations()
       .then(({ registrations: list }) => {
         const regList = (list || []).filter(reg => !isEventRegistrationDraft(reg))
@@ -17013,7 +17024,7 @@ function StudentRegistrations({ user, logout, onNavigate }) {
 
   useEffect(() => {
     fetchRegistrations()
-    const interval = setInterval(fetchRegistrations, 45000)
+    const interval = setInterval(fetchRegistrations, 90000)
     return () => clearInterval(interval)
   }, [cacheKey])
 
@@ -21895,7 +21906,7 @@ function CouncilChatView({ user, logout, onNavigate }) {
   }
 
   function loadMessages() {
-    if (document.hidden) return
+    if (document.hidden || !isUserActive()) return
     adminApi.listCouncilMessages()
       .then(res => {
         const incoming = res?.messages || []
@@ -21918,7 +21929,7 @@ function CouncilChatView({ user, logout, onNavigate }) {
 
   useEffect(() => {
     loadMessages()
-    const interval = setInterval(loadMessages, 15000)
+    const interval = setInterval(loadMessages, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -22443,7 +22454,7 @@ function App() {
       return
     }
     const heartbeatInterval = setInterval(() => {
-      if (document.hidden) return
+      if (document.hidden || !isUserActive()) return
       memberApi.queueHeartbeat().catch(() => {})
     }, 60000)
 

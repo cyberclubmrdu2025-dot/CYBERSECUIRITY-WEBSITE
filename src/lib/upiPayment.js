@@ -1,5 +1,4 @@
 import QRCode from 'qrcode'
-import { createWorker } from 'tesseract.js'
 import { memberApi } from './api.js'
 
 /**
@@ -173,6 +172,7 @@ export async function extractUtrFromScreenshot(imageFile, onProgress) {
     const preparedCanvas = await preprocessImage(imageFile, 1200)
 
     if (onProgress) onProgress({ status: 'loading_scanner', progress: 0.25, message: 'Initializing OCR scanner engine...' })
+    const { createWorker } = await import('tesseract.js')
     worker = await createWorker('eng', 1, {
       logger: m => {
         if (onProgress && m?.status === 'recognizing text') {

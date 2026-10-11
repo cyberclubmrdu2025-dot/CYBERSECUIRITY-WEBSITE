@@ -36,8 +36,24 @@ async function fetchWithTimeoutAndRetry(url, fetchOptions, retries = 1, timeoutM
   }
 }
 
+// User Activity & Idle Tracker to eliminate idle background requests
+let _lastActivityTime = Date.now()
+if (typeof window !== 'undefined') {
+  const recordActivity = () => { _lastActivityTime = Date.now() }
+  window.addEventListener('mousemove', recordActivity, { passive: true })
+  window.addEventListener('touchstart', recordActivity, { passive: true })
+  window.addEventListener('keydown', recordActivity, { passive: true })
+  window.addEventListener('scroll', recordActivity, { passive: true })
+}
+
+export function isUserActive(maxIdleMs = 120_000) {
+  if (typeof document !== 'undefined' && document.hidden) return false
+  return Date.now() - _lastActivityTime < maxIdleMs
+}
+
 // In-memory + persistent client cache for low-bandwidth devices & offline operation
 const memoryCache = new Map()
+const inFlightRequests = new Map()
 const CACHE_TTL_MS = 30_000 // 30s fresh TTL window
 
 function getStoredCache(cacheKey) {
@@ -104,6 +120,11 @@ async function request(path, options = {}) {
     }
   }
 
+  // 2. Request Coalescing (Single-Flight Deduplication): share in-flight promises across concurrent calls
+  if (isGet && inFlightRequests.has(cacheKey)) {
+    return inFlightRequests.get(cacheKey)
+  }
+
   const headers = new Headers(options.headers || {})
   headers.set('X-Requested-With', 'XMLHttpRequest')
   if (currentCsrfToken && !headers.has('X-CSRF-Token')) {
@@ -113,52 +134,65 @@ async function request(path, options = {}) {
     headers.set('Content-Type', 'application/json')
   }
 
-  try {
-    const response = await fetchWithTimeoutAndRetry(
-      `/api${path}`,
-      {
-        ...options,
-        headers,
-        credentials: 'same-origin',
-      },
-      isGet ? 1 : 0, // Auto-retry once on GET requests for weak mobile connections
-      options.timeoutMs || 22000
-    )
+  const performFetch = async () => {
+    try {
+      const response = await fetchWithTimeoutAndRetry(
+        `/api${path}`,
+        {
+          ...options,
+          headers,
+          credentials: 'same-origin',
+        },
+        isGet ? 1 : 0, // Auto-retry once on GET requests for weak mobile connections
+        options.timeoutMs || 22000
+      )
 
-    if (response.status === 204) return {}
+      if (response.status === 204) return {}
 
-    const payload = await response.json().catch(() => ({}))
-    if (payload.csrfToken) {
-      currentCsrfToken = payload.csrfToken
-    }
-    if (!response.ok) {
-      const error = new Error(payload.message || 'Request failed.')
-      error.status = response.status
-      error.code = payload.code
-      error.hibernating = response.status === 503 || payload.code === 'SITE_HIBERNATING'
-      throw error
-    }
-
-    // Save successful GET response to memory + localStorage for low-internet/offline devices
-    if (isGet) {
-      setStoredCache(cacheKey, payload)
-    } else {
-      // Invalidate related cache on write/mutation
-      memoryCache.clear()
-    }
-
-    return payload
-  } catch (err) {
-    // 2. Worst Internet / Offline Resilience: Return cached data on ANY network blip or timeout
-    if (isGet) {
-      const fallbackCached = getStoredCache(cacheKey)
-      if (fallbackCached?.data) {
-        console.warn(`[OFFLINE CACHE ACTIVE] Serving cached copy for ${path} due to weak internet (${err.message})`)
-        return fallbackCached.data
+      const payload = await response.json().catch(() => ({}))
+      if (payload.csrfToken) {
+        currentCsrfToken = payload.csrfToken
       }
+      if (!response.ok) {
+        const error = new Error(payload.message || 'Request failed.')
+        error.status = response.status
+        error.code = payload.code
+        error.hibernating = response.status === 503 || payload.code === 'SITE_HIBERNATING'
+        throw error
+      }
+
+      // Save successful GET response to memory + localStorage for low-internet/offline devices
+      if (isGet) {
+        setStoredCache(cacheKey, payload)
+      } else {
+        // Invalidate related cache on write/mutation
+        memoryCache.clear()
+      }
+
+      return payload
+    } catch (err) {
+      // Worst Internet / Offline Resilience: Return cached data on ANY network blip or timeout
+      if (isGet) {
+        const fallbackCached = getStoredCache(cacheKey)
+        if (fallbackCached?.data) {
+          console.warn(`[OFFLINE CACHE ACTIVE] Serving cached copy for ${path} due to weak internet (${err.message})`)
+          return fallbackCached.data
+        }
+      }
+      throw err
     }
-    throw err
   }
+
+  if (isGet) {
+    const fetchPromise = performFetch()
+    inFlightRequests.set(cacheKey, fetchPromise)
+    fetchPromise.finally(() => {
+      inFlightRequests.delete(cacheKey)
+    })
+    return fetchPromise
+  }
+
+  return performFetch()
 }
 
 /**
@@ -273,7 +307,7 @@ export async function readMultipleImageFiles(fileList) {
 
 export const authApi = {
   me: () => request('/auth/me'),
-  getPublicSettings: () => request('/auth/public-settings'),
+  getPublicSettings: () => request('/auth/public-settings', { cacheTtlMs: 300_000 }),
   login: (memberId, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ memberId, password }) }),
   registerGuest: payload => request('/auth/register-guest', { method: 'POST', body: JSON.stringify(payload) }),
   verifyTwoFactor: code => request('/auth/verify-2fa', { method: 'POST', body: JSON.stringify({ code }) }),
@@ -424,10 +458,10 @@ export const memberApi = {
   searchStudents: q => request(`/member/members/search?q=${encodeURIComponent(q)}`),
   updateProfile: profile => request('/member/profile', { method: 'PUT', body: JSON.stringify(profile) }),
   createComplaint: complaint => request('/member/complaints', { method: 'POST', body: JSON.stringify(complaint) }),
-  listGallery: () => request('/member/gallery'),
+  listGallery: () => request('/member/gallery', { cacheTtlMs: 300_000 }),
   getGalleryAlbum: albumId => request(`/member/gallery/${albumId}`),
-  listClubTeam: () => request('/member/team'),
-  getPublicClubSettings: () => request('/auth/public-settings'),
+  listClubTeam: () => request('/member/team', { cacheTtlMs: 300_000 }),
+  getPublicClubSettings: () => request('/auth/public-settings', { cacheTtlMs: 300_000 }),
   getSessionStatus: () => request('/member/session-status'),
   completeIntroVideo: () => request('/member/intro-video/complete', { method: 'POST' }),
   completeWaitingQueue: () => request('/member/waiting-queue/complete', { method: 'POST' }),
