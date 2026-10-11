@@ -11505,6 +11505,8 @@ function PassEmailDispatchModal({
   const [loadingResolve, setLoadingResolve] = useState(false)
   const [sendingRowKey, setSendingRowKey] = useState(null)
   const [sendingBatch, setSendingBatch] = useState(false)
+  const [batchProgress, setBatchProgress] = useState(null)
+  const [allowBatchResend, setAllowBatchResend] = useState(false)
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [searchFilter, setSearchFilter] = useState('')
   const [error, setError] = useState('')
@@ -12033,23 +12035,43 @@ function PassEmailDispatchModal({
     }
   }
 
-  // 1-Click Batch Send to ALL Ready Students (plus any EMAIL_NOT_GIVEN rows where admin typed an inline email)
+  // 1-Click Batch Send to ALL Ready Students (chunks of 6 for 100% timeout safety + live progress)
   async function handleSendAllReady() {
     if (!selectedEventId || !resolvedData?.recipients) return
     const eligibleToSend = resolvedData.recipients.filter(r => {
-      if (!r.registrationId || !r.hasActivePass || r.emailSent || r.dispatchStatus === 'ALREADY_SENT') return false
+      if (!r.registrationId || !r.hasActivePass) return false
       const inlineEmail = (inlineEmails[r.registrationId] || '').trim()
-      return Boolean(r.dispatchStatus === 'READY' || (r.dispatchStatus === 'EMAIL_NOT_GIVEN' && inlineEmail))
+      const effectiveEmail = inlineEmail || r.email || ''
+      if (!effectiveEmail) return false
+      if (!allowBatchResend && (r.emailSent || r.dispatchStatus === 'ALREADY_SENT')) return false
+      return true
     })
 
     if (eligibleToSend.length === 0) {
-      setError('No ready students to send emails to. Students with "SENT / DONE" are skipped to prevent duplicates, and "EMAIL NOT GIVEN" requires an email.')
+      setError(
+        allowBatchResend
+          ? 'No eligible students with valid email addresses found to send passes to.'
+          : 'No un-sent students to dispatch. Turn on "Allow Re-sending to Already Sent Students" below to re-send to everyone.'
+      )
       return
     }
 
     setSendingBatch(true)
     setError('')
     setFeedback(null)
+    setBatchProgress({
+      current: 0,
+      total: eligibleToSend.length,
+      percent: 0,
+      statusText: `Preparing pass emails for ${eligibleToSend.length} student(s)…`,
+    })
+
+    const CHUNK_SIZE = 6
+    let totalSent = 0
+    let totalFailed = 0
+    let totalAlreadySent = 0
+    let lastErr = ''
+
     try {
       const payloadRecipients = eligibleToSend.map(r => {
         const rowKey = r.registrationId
@@ -12064,44 +12086,82 @@ function PassEmailDispatchModal({
           name: r.name,
           email: inlineEmail || r.email,
           customMessage: studentCustomMsg.trim() || undefined,
+          forceResend: allowBatchResend,
         }
       })
 
-      const res = await adminApi.sendEventPassEmails(selectedEventId, {
-        customMessage: globalCustomMessage,
-        gmailRelayUrl: gmailRelayUrlInput.trim() || undefined,
-        recipients: payloadRecipients,
+      const totalItems = payloadRecipients.length
+      const totalBatches = Math.ceil(totalItems / CHUNK_SIZE)
+
+      for (let i = 0; i < totalItems; i += CHUNK_SIZE) {
+        const chunk = payloadRecipients.slice(i, i + CHUNK_SIZE)
+        const batchNum = Math.floor(i / CHUNK_SIZE) + 1
+
+        setBatchProgress({
+          current: i,
+          total: totalItems,
+          percent: Math.round((i / totalItems) * 100),
+          statusText: `Dispatching Batch ${batchNum} of ${totalBatches} (${i}/${totalItems} completed)…`,
+        })
+
+        const res = await adminApi.sendEventPassEmails(selectedEventId, {
+          customMessage: globalCustomMessage,
+          gmailRelayUrl: gmailRelayUrlInput.trim() || undefined,
+          forceResend: allowBatchResend,
+          recipients: chunk,
+        })
+
+        totalSent += res.sentCount || 0
+        totalFailed += res.failedCount || 0
+        totalAlreadySent += res.alreadySentCount || 0
+        if (res.failed?.[0]?.message) lastErr = res.failed[0].message
+      }
+
+      setBatchProgress({
+        current: totalItems,
+        total: totalItems,
+        percent: 100,
+        statusText: `Complete! Successfully sent ${totalSent} pass email(s).`,
       })
 
-      if ((res.failedCount || 0) > 0 && (res.sentCount || 0) === 0) {
-        const firstErr = res.failed?.[0]?.message || ''
-        setError(firstErr || res.message || 'Batch email dispatch failed.')
-        if (/ENETUNREACH|ETIMEDOUT|ECONNREFUSED|Port 443|blocks outbound/i.test(firstErr)) {
+      if (totalSent > 0) {
+        setFeedback({
+          type: totalFailed > 0 ? 'warning' : 'success',
+          text: `✅ Dispatched ${totalSent} pass email(s) from cyberclubmrdu2025@gmail.com!${totalFailed > 0 ? ` (${totalFailed} failed)` : ''}`,
+        })
+      } else if (totalAlreadySent > 0 && !allowBatchResend) {
+        setFeedback({
+          type: 'warning',
+          text: `${totalAlreadySent} student(s) were already sent passes previously. Turn on "Allow Re-sending" to send again.`,
+        })
+      } else if (totalFailed > 0) {
+        setError(lastErr || 'Batch email dispatch encountered an error.')
+        if (/ENETUNREACH|ETIMEDOUT|ECONNREFUSED|Port 443|blocks outbound/i.test(lastErr)) {
           setShowRelayConfig(true)
         }
-      } else {
-        setFeedback({
-          type: (res.failedCount || 0) > 0 ? 'warning' : 'success',
-          text: res.message || `Sent ${res.sentCount || 0} pass email(s) from cyberclubmrdu2025@gmail.com.`,
-        })
       }
+
       await triggerResolve()
       if (onSuccess) onSuccess()
     } catch (err) {
       setError(err.message || 'Batch email dispatch failed.')
     } finally {
       setSendingBatch(false)
+      setTimeout(() => setBatchProgress(null), 4000)
     }
   }
 
   const recipients = useMemo(() => resolvedData?.recipients || [], [resolvedData])
   const readyWithInlineCount = useMemo(() => {
     return recipients.filter(r => {
-      if (!r.registrationId || !r.hasActivePass || r.emailSent || r.dispatchStatus === 'ALREADY_SENT') return false
+      if (!r.registrationId || !r.hasActivePass) return false
       const inlineEmail = (inlineEmails[r.registrationId] || '').trim()
-      return Boolean(r.dispatchStatus === 'READY' || (r.dispatchStatus === 'EMAIL_NOT_GIVEN' && inlineEmail))
+      const effectiveEmail = inlineEmail || r.email || ''
+      if (!effectiveEmail) return false
+      if (!allowBatchResend && (r.emailSent || r.dispatchStatus === 'ALREADY_SENT')) return false
+      return true
     }).length
-  }, [recipients, inlineEmails])
+  }, [recipients, inlineEmails, allowBatchResend])
 
   const filteredRecipients = useMemo(() => {
     return recipients.filter(r => {
@@ -12570,12 +12630,21 @@ function PassEmailDispatchModal({
               onChange={e => setSearchFilter(e.target.value)}
               style={{ flex: 1, minWidth: '220px', height: '36px', padding: '0 12px', borderRadius: '8px', border: '1px solid var(--line)', background: 'var(--bg-input)', color: 'var(--text-main)', fontSize: '12px' }}
             />
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                <input
+                  type="checkbox"
+                  checked={allowBatchResend}
+                  onChange={e => setAllowBatchResend(e.target.checked)}
+                  style={{ accentColor: '#38bdf8' }}
+                />
+                <span>Allow Re-sending to Already Sent (Force Re-send)</span>
+              </label>
               <button
                 type="button"
                 className="outline"
                 onClick={triggerResolve}
-                disabled={loadingResolve}
+                disabled={loadingResolve || sendingBatch}
                 style={{ height: '36px', fontSize: '11px', padding: '0 12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
               >
                 <IconRefresh size={13} className={loadingResolve ? 'spin-inline' : ''} /> Refresh List
@@ -12593,17 +12662,37 @@ function PassEmailDispatchModal({
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '6px',
-                  background: readyWithInlineCount > 0 ? 'linear-gradient(135deg, #10b981, #059669)' : 'var(--panel-subtle)',
+                  background: readyWithInlineCount > 0 ? (allowBatchResend ? 'linear-gradient(135deg, #0284c7, #0369a1)' : 'linear-gradient(135deg, #10b981, #059669)') : 'var(--panel-subtle)',
                   border: 'none',
                   color: readyWithInlineCount > 0 ? '#fff' : 'var(--text-dim)',
                   cursor: readyWithInlineCount > 0 ? 'pointer' : 'not-allowed',
                 }}
               >
                 <IconMail size={14} />
-                {sendingBatch ? 'SENDING PASS EMAILS…' : `SEND TO ALL READY (${readyWithInlineCount})`}
+                {sendingBatch ? 'SENDING IN BATCHES…' : allowBatchResend ? `RE-SEND PASSES TO ALL (${readyWithInlineCount}) ↺` : `SEND TO ALL READY (${readyWithInlineCount})`}
               </button>
             </div>
           </div>
+
+          {/* Live Batch Dispatch Progress Bar */}
+          {batchProgress && (
+            <div style={{ marginTop: '10px', padding: '10px 14px', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '8px', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11.5px', marginBottom: '6px' }}>
+                <span style={{ color: '#38bdf8', fontWeight: 600 }}>{batchProgress.statusText}</span>
+                <span style={{ color: 'var(--text-dim)', font: '700 11.5px "DM Mono", monospace' }}>{batchProgress.percent}%</span>
+              </div>
+              <div style={{ width: '100%', height: '7px', background: 'var(--line)', borderRadius: '999px', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${batchProgress.percent}%`,
+                    height: '100%',
+                    background: 'linear-gradient(90deg, #38bdf8, #10b981)',
+                    transition: 'width 0.3s ease',
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* STEP 5: Student Pass Email Dispatch Table */}
