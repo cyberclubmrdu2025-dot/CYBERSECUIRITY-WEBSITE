@@ -36,9 +36,33 @@ async function fetchWithTimeoutAndRetry(url, fetchOptions, retries = 1, timeoutM
   }
 }
 
-// In-memory + persistent client cache for low-bandwidth devices & tab-switching throttle
+// In-memory + persistent client cache for low-bandwidth devices & offline operation
 const memoryCache = new Map()
-const CACHE_TTL_MS = 25_000 // 25s fresh window: micro tab-switches within 25s make 0 network requests
+const CACHE_TTL_MS = 30_000 // 30s fresh TTL window
+
+function getStoredCache(cacheKey) {
+  let item = memoryCache.get(cacheKey)
+  if (!item && typeof localStorage !== 'undefined') {
+    try {
+      const stored = localStorage.getItem(`offline_${cacheKey}`)
+      if (stored) {
+        item = JSON.parse(stored)
+        if (item) memoryCache.set(cacheKey, item)
+      }
+    } catch {}
+  }
+  return item
+}
+
+function setStoredCache(cacheKey, data) {
+  const record = { timestamp: Date.now(), data }
+  memoryCache.set(cacheKey, record)
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(`offline_${cacheKey}`, JSON.stringify(record))
+    } catch {}
+  }
+}
 
 export function invalidateApiCache(pathPrefix = '') {
   if (!pathPrefix) {
@@ -57,11 +81,26 @@ async function request(path, options = {}) {
   const cacheKey = `csc_api_${path}`
   const now = Date.now()
 
-  // 1. Fresh Cache Check for GET requests (prevents rapid tab-switching database hits)
+  // 1. Offline-First & Stale-While-Revalidate Check for GET requests
   if (isGet && !options.skipCache) {
-    const cached = memoryCache.get(cacheKey)
-    if (cached && (now - cached.timestamp < (options.cacheTtlMs || CACHE_TTL_MS))) {
-      return cached.data
+    const cached = getStoredCache(cacheKey)
+    if (cached?.data) {
+      const age = now - cached.timestamp
+      const isFresh = age < (options.cacheTtlMs || CACHE_TTL_MS)
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
+
+      // Return immediately (0ms) if fresh OR if user is currently offline / spotty internet
+      if (isFresh || isOffline) {
+        return cached.data
+      }
+
+      // If stale but within 15 minutes, return stale immediately (instant UI paint) and revalidate in background
+      if (age < 900_000 && !options.forceFresh) {
+        setTimeout(() => {
+          request(path, { ...options, skipCache: true, forceFresh: true }).catch(() => {})
+        }, 15)
+        return cached.data
+      }
     }
   }
 
@@ -102,12 +141,7 @@ async function request(path, options = {}) {
 
     // Save successful GET response to memory + localStorage for low-internet/offline devices
     if (isGet) {
-      memoryCache.set(cacheKey, { timestamp: now, data: payload })
-      try {
-        if (path.startsWith('/member/') || path.startsWith('/auth/settings')) {
-          localStorage.setItem(`offline_${cacheKey}`, JSON.stringify({ timestamp: now, data: payload }))
-        }
-      } catch {}
+      setStoredCache(cacheKey, payload)
     } else {
       // Invalidate related cache on write/mutation
       memoryCache.clear()
@@ -115,17 +149,13 @@ async function request(path, options = {}) {
 
     return payload
   } catch (err) {
-    // 2. Offline / Low Internet Fallback: Return cached data if available on network failure
+    // 2. Worst Internet / Offline Resilience: Return cached data on ANY network blip or timeout
     if (isGet) {
-      const memCached = memoryCache.get(cacheKey)
-      if (memCached?.data) return memCached.data
-      try {
-        const stored = localStorage.getItem(`offline_${cacheKey}`)
-        if (stored) {
-          const parsed = JSON.parse(stored)
-          if (parsed?.data) return parsed.data
-        }
-      } catch {}
+      const fallbackCached = getStoredCache(cacheKey)
+      if (fallbackCached?.data) {
+        console.warn(`[OFFLINE CACHE ACTIVE] Serving cached copy for ${path} due to weak internet (${err.message})`)
+        return fallbackCached.data
+      }
     }
     throw err
   }

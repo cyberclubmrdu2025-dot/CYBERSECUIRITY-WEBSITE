@@ -135,7 +135,25 @@ function serializeEventForStudent(event, userId) {
   }
 }
 
+// In-memory micro-cache for published events (0ms RAM response instead of 250ms cross-globe DB trip)
+const cachedEventsMap = new Map()
+
+export function invalidateEventsCache(userId = null) {
+  if (userId) {
+    cachedEventsMap.delete(`events_${userId}`)
+  } else {
+    cachedEventsMap.clear()
+  }
+}
+
 export async function listPublishedEvents(request, response) {
+  const now = Date.now()
+  const cacheKey = `events_${request.user.id}`
+  const userCached = cachedEventsMap.get(cacheKey)
+  if (userCached && now < userCached.expiry) {
+    return response.status(200).json({ events: userCached.data })
+  }
+
   const events = await prisma.event.findMany({
     where: { status: { in: ['UPCOMING', 'OPEN', 'LIVE'] } },
     include: {
@@ -165,8 +183,12 @@ export async function listPublishedEvents(request, response) {
     ],
   })
 
+  const serialized = events.map(e => serializeEventForStudent(e, request.user.id))
+  cachedEventsMap.set(cacheKey, { data: serialized, expiry: now + 30_000 })
+  if (cachedEventsMap.size > 2000) cachedEventsMap.clear()
+
   return response.status(200).json({
-    events: events.map(e => serializeEventForStudent(e, request.user.id)),
+    events: serialized,
   })
 }
 

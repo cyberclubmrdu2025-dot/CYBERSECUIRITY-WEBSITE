@@ -22153,6 +22153,28 @@ function App() {
   const [screen, setScreen] = useState(resetToken ? 'reset-password' : 'login')
   const [checkingSession, setCheckingSession] = useState(true)
 
+  // Worst Internet / Offline Resilience & Banner
+  const [isOffline, setIsOffline] = useState(() => typeof navigator !== 'undefined' ? !navigator.onLine : false)
+  const [showReconnectedBadge, setShowReconnectedBadge] = useState(false)
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOffline(false)
+      setShowReconnectedBadge(true)
+      setTimeout(() => setShowReconnectedBadge(false), 4000)
+    }
+    const handleOffline = () => {
+      setIsOffline(true)
+      setShowReconnectedBadge(false)
+    }
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
+
   // Platform Mode & Theme System
   const [platformMode, setPlatformMode] = useState('CYBER_SECURITY_CLUB')
   const [themeMode, setThemeModeState] = useState(() => {
@@ -22599,6 +22621,45 @@ function App() {
       onSwitchBackToAdmin: handleSwitchBackToAdmin,
     }}>
       <PortalErrorBoundary onReset={() => setScreen(effectiveUser?.isAdminUser ? 'admin-dashboard' : 'student-events')}>
+        {isOffline && (
+          <div style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 999999,
+            background: 'linear-gradient(90deg, #b45309, #d97706)',
+            color: '#fff',
+            padding: '7px 16px',
+            fontSize: '11.5px',
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+            letterSpacing: '0.02em',
+          }}>
+            <span>⚡ Low / No Internet Mode: You are offline. Your verified passes, QR tickets, and schedule are loaded from offline cache.</span>
+          </div>
+        )}
+        {showReconnectedBadge && (
+          <div style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 999999,
+            background: 'linear-gradient(90deg, #10b981, #059669)',
+            color: '#fff',
+            padding: '7px 16px',
+            fontSize: '11.5px',
+            fontWeight: 700,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+          }}>
+            <span>✅ Internet Reconnected! Re-synced with server.</span>
+          </div>
+        )}
         {renderContent()}
       </PortalErrorBoundary>
     </PlatformThemeContext.Provider>
